@@ -1,0 +1,5 @@
+# 部署觸發器
+# 此檔案用於觸發 Render 重新同步和部署
+# 更新時間：2025-10-19
+
+deployment_trigger = "render-sync-20251019"
