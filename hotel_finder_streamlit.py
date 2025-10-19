@@ -268,27 +268,85 @@ st.markdown("<br>", unsafe_allow_html=True)
 st.markdown('<div class="search-container">', unsafe_allow_html=True)
 st.markdown("### 🔍 開始您的飯店搜尋之旅")
 
-# 在側邊欄顯示應用程式資訊
+# 載入資料（移到側邊欄外面，避免重複載入）
+df = download_hotel_data()
+
+# 在側邊欄顯示篩選選項
 with st.sidebar:
+    st.markdown("### 🎛️ 篩選設定")
+    
+    # 1. 星級篩選器
+    st.markdown("#### ⭐ 星級篩選")
+    if df is not None:
+        # 獲取所有星級選項
+        star_options = df['標章'].unique().tolist()
+        star_options.sort()
+        
+        # 添加 "全部" 選項
+        star_filter_options = ["🌟 全部星級"] + [f"⭐ {star}" for star in star_options if "星" in str(star)]
+        
+        selected_star = st.selectbox(
+            "選擇星級標準",
+            options=star_filter_options,
+            help="篩選特定星級的飯店"
+        )
+    else:
+        selected_star = "� 全部星級"
+    
+    # 2. 搜尋範圍調整
+    st.markdown("#### 📍 搜尋範圍")
+    distance_range = st.slider(
+        "設定搜尋距離 (公里)",
+        min_value=5,
+        max_value=30,
+        value=10,
+        step=5,
+        help="調整搜尋範圍，預設為 10 公里"
+    )
+    
+    # 3. 飯店規模篩選（基於房間數）
+    st.markdown("#### 🏨 飯店規模")
+    if df is not None:
+        # 基於房間數分類飯店規模
+        room_filter = st.selectbox(
+            "選擇飯店規模",
+            options=[
+                "🏨 全部規模",
+                "🏠 精品小型 (50間以下)",
+                "🏢 中型規模 (50-150間)",
+                "🏨 大型飯店 (150-300間)",
+                "🏰 超大型 (300間以上)"
+            ],
+            help="根據房間數量篩選飯店規模"
+        )
+    else:
+        room_filter = "🏨 全部規模"
+    
+    # 4. 溫泉篩選
+    st.markdown("#### ♨️ 溫泉標章")
+    hot_spring_filter = st.checkbox(
+        "🌊 僅顯示溫泉飯店",
+        help="篩選有溫泉標章的飯店"
+    )
+    
+    st.markdown("---")
+    
+    # 系統資訊
     st.markdown("### 📋 系統資訊")
-    st.markdown("""
-    **🎯 搜尋特色**
-    - 搜尋範圍：10公里內
-    - 僅顯示星級飯店
-    - 按距離智能排序
-    - 使用 Pandas 高效處理
-    
-    **📊 資料來源**
-    - 政府開放資料
-    - 即時地理編碼
-    - 精確距離計算
-    """)
-    
-    # 載入資料狀態
-    df = download_hotel_data()
     if df is not None:
         st.success(f"✅ 已載入 {len(df)} 筆飯店資料")
-        st.info("🌟 涵蓋全台星級飯店")
+        
+        # 顯示篩選統計
+        filtered_count = len(df)
+        if selected_star != "🌟 全部星級":
+            star_name = selected_star.replace("⭐ ", "")
+            filtered_count = len(df[df['標章'] == star_name])
+        
+        if hot_spring_filter:
+            hot_spring_count = len(df[df['溫泉標章'] == '是'])
+            st.info(f"♨️ 溫泉飯店：{hot_spring_count} 間")
+        
+        st.info(f"🌟 涵蓋全台星級飯店")
     else:
         st.error("❌ 資料載入失敗")
 
@@ -314,7 +372,7 @@ if search_button and place:
         st.error("❌ 無法載入飯店資料，請稍後再試")
         st.stop()
     
-    with st.spinner(f"🔍 正在搜尋 {place} 附近的星級飯店..."):
+    with st.spinner(f"🔍 正在搜尋 {place} 附近 {distance_range} 公里內的星級飯店..."):
         loc = get_location_latlng(place)
         
     if loc is None:
@@ -323,20 +381,53 @@ if search_button and place:
     else:
         st.success(f"✅ 找到 {place} 的位置：緯度 {loc[0]:.6f}, 經度 {loc[1]:.6f}")
         
-        # 篩選星級飯店
-        star_df = filter_star_hotels(df)
+        # 應用篩選條件
+        filtered_df = df.copy()
+        
+        # 1. 篩選星級飯店（基本篩選）
+        filtered_df = filter_star_hotels(filtered_df)
+        
+        # 2. 應用星級篩選器
+        if selected_star != "🌟 全部星級":
+            star_name = selected_star.replace("⭐ ", "")
+            filtered_df = filtered_df[filtered_df['標章'] == star_name]
+        
+        # 3. 應用溫泉篩選
+        if hot_spring_filter:
+            filtered_df = filtered_df[filtered_df['溫泉標章'] == '是']
+        
+        # 4. 應用房間數篩選（飯店規模）
+        if room_filter != "🏨 全部規模":
+            if room_filter == "🏠 精品小型 (50間以下)":
+                filtered_df = filtered_df[filtered_df['房間數'].astype(float) < 50]
+            elif room_filter == "🏢 中型規模 (50-150間)":
+                filtered_df = filtered_df[
+                    (filtered_df['房間數'].astype(float) >= 50) & 
+                    (filtered_df['房間數'].astype(float) <= 150)
+                ]
+            elif room_filter == "🏨 大型飯店 (150-300間)":
+                filtered_df = filtered_df[
+                    (filtered_df['房間數'].astype(float) > 150) & 
+                    (filtered_df['房間數'].astype(float) <= 300)
+                ]
+            elif room_filter == "🏰 超大型 (300間以上)":
+                filtered_df = filtered_df[filtered_df['房間數'].astype(float) > 300]
+        
+        # 5. 搜尋指定範圍內的飯店
         hotels = []
         
-        for _, row in star_df.iterrows():
+        for _, row in filtered_df.iterrows():
             try:
                 hotel_loc = (float(row['lat']), float(row['lng']))
                 distance = geodesic(loc, hotel_loc).km
-                if distance <= 10:
+                if distance <= distance_range:  # 使用用戶設定的距離範圍
                     hotels.append({
                         "飯店名稱": row['旅宿名稱'],
                         "星級標章": row['標章'],
                         "地址": row['地址'],
                         "電話": row.get('電話或手機', 'N/A'),
+                        "房間數": row.get('房間數', 'N/A'),
+                        "溫泉": "♨️" if row.get('溫泉標章', '') == '是' else "",
                         "距離(公里)": round(distance, 2)
                     })
             except Exception:
@@ -347,11 +438,25 @@ if search_button and place:
         
         if hotels:
             # 美化的結果標題
+            # 生成搜尋條件描述
+            search_conditions = []
+            if selected_star != "🌟 全部星級":
+                search_conditions.append(selected_star.replace("⭐ ", ""))
+            if hot_spring_filter:
+                search_conditions.append("♨️ 溫泉飯店")
+            if room_filter != "🏨 全部規模":
+                search_conditions.append(room_filter.split(" ")[1])
+            
+            condition_text = " | ".join(search_conditions) if search_conditions else "全部類型"
+            
             st.markdown(f"""
             <div class="result-card">
                 <h2 style="color: #2E86AB; text-align: center; margin-bottom: 1rem;">
-                    � 搜尋結果：{place} 附近的星級飯店
+                    🎉 搜尋結果：{place} 附近 {distance_range}km 內的星級飯店
                 </h2>
+                <p style="text-align: center; color: #666; font-size: 1.1rem;">
+                    篩選條件：{condition_text}
+                </p>
             </div>
             """, unsafe_allow_html=True)
             
@@ -426,6 +531,17 @@ if search_button and place:
                         "📞 聯絡電話",
                         help="飯店聯絡電話"
                     ),
+                    "房間數": st.column_config.NumberColumn(
+                        "🏢 房間數",
+                        help="飯店總房間數",
+                        format="%d",
+                        width="small"
+                    ),
+                    "溫泉": st.column_config.TextColumn(
+                        "♨️ 溫泉",
+                        help="是否有溫泉設施",
+                        width="small"
+                    ),
                     "距離(公里)": st.column_config.NumberColumn(
                         "📏 距離(公里)",
                         help="距離查詢地點的直線距離",
@@ -477,14 +593,15 @@ if search_button and place:
             st.markdown(f"""
             <div class="result-card" style="text-align: center; padding: 3rem;">
                 <h2 style="color: #e74c3c;">😔 很抱歉</h2>
-                <p style="font-size: 1.2rem; color: #7f8c8d;">在 <strong>{place}</strong> 10公里內找不到星級飯店</p>
+                <p style="font-size: 1.2rem; color: #7f8c8d;">在 <strong>{place}</strong> {distance_range}公里內找不到符合條件的星級飯店</p>
                 <div style="background: #fff3cd; padding: 1rem; border-radius: 10px; margin-top: 1rem;">
                     <h4 style="color: #856404;">💡 建議嘗試</h4>
                     <ul style="color: #856404; text-align: left;">
+                        <li>增加搜尋範圍距離</li>
+                        <li>調整星級篩選條件</li>
+                        <li>取消溫泉或規模限制</li>
                         <li>搜尋其他鄰近地點</li>
                         <li>嘗試較大的城市中心區域</li>
-                        <li>確認地名拼寫是否正確</li>
-                        <li>使用更具體的地址</li>
                     </ul>
                 </div>
             </div>
@@ -502,16 +619,16 @@ st.markdown("""
     <h3 style="margin-bottom: 1rem;">🏨 台灣星級飯店地理查詢系統</h3>
     <div style="display: flex; justify-content: center; align-items: center; gap: 2rem; flex-wrap: wrap;">
         <div>
-            <p style="margin: 0;"><strong>🎯 精準搜尋</strong><br>10公里智能範圍</p>
+            <p style="margin: 0;"><strong>🎯 智能篩選</strong><br>多條件自定義搜尋</p>
         </div>
         <div>
-            <p style="margin: 0;"><strong>⭐ 星級品質</strong><br>政府認證飯店</p>
+            <p style="margin: 0;"><strong>⭐ 星級品質</strong><br>政府認證飯店分級</p>
         </div>
         <div>
-            <p style="margin: 0;"><strong>📊 高效處理</strong><br>Pandas 數據分析</p>
+            <p style="margin: 0;"><strong>� 彈性距離</strong><br>5-30公里自由調整</p>
         </div>
         <div>
-            <p style="margin: 0;"><strong>🚀 標準版本</strong><br>完整功能支援</p>
+            <p style="margin: 0;"><strong>♨️ 溫泉特色</strong><br>溫泉飯店專門篩選</p>
         </div>
     </div>
     <hr style="border-color: rgba(255,255,255,0.3); margin: 1.5rem 0;">
