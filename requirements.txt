@@ -1,0 +1,6 @@
+# 簡化依賴清單，避免 Windows 編譯問題
+streamlit>=1.25.0
+geopy>=2.3.0
+
+# 注意：Render 雲端環境會自動安裝相容的 pandas 和 pyarrow 版本
+# 本地 Windows 環境如遇到編譯問題，可使用 lite 版本進行開發
