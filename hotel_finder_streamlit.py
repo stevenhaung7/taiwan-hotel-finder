@@ -10,7 +10,7 @@ st.set_page_config(
     page_title="🏨 台灣星級飯店地理查詢", 
     layout="wide",
     page_icon="🏨",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"  # 展開側邊欄以顯示篩選選項
 )
 
 # 自定義 CSS 樣式
@@ -181,6 +181,67 @@ def filter_star_hotels(df):
     # 只要「標章」欄有「星級」兩字就視為星級旅館
     return df[df['標章'].astype(str).str.contains("星級", na=False)]
 
+def search_hotels_for_location(location, filtered_df, distance_range):
+    """為單一地點搜尋飯店"""
+    loc = get_location_latlng(location)
+    if loc is None:
+        return None, []
+    
+    hotels = []
+    for _, row in filtered_df.iterrows():
+        try:
+            hotel_loc = (float(row['lat']), float(row['lng']))
+            distance = geodesic(loc, hotel_loc).km
+            if distance <= distance_range:
+                hotels.append({
+                    "飯店名稱": row['旅宿名稱'],
+                    "星級標章": row['標章'],
+                    "地址": row['地址'],
+                    "電話": row.get('電話或手機', 'N/A'),
+                    "房間數": row.get('房間數', 'N/A'),
+                    "溫泉": "♨️" if row.get('溫泉標章', '') == '是' else "",
+                    "距離(公里)": round(distance, 2),
+                    "經度": float(row['lng']),
+                    "緯度": float(row['lat'])
+                })
+        except Exception:
+            continue
+    
+    # 按距離排序
+    hotels = sorted(hotels, key=lambda x: x['距離(公里)'])
+    return loc, hotels
+
+def generate_comparison_stats(location_results):
+    """生成多地點比較統計"""
+    stats = []
+    for location, (coords, hotels) in location_results.items():
+        if coords and hotels:
+            five_star_count = len([h for h in hotels if '五星' in h['星級標章']])
+            hot_spring_count = len([h for h in hotels if h['溫泉'] == '♨️'])
+            avg_distance = sum([h['距離(公里)'] for h in hotels]) / len(hotels) if hotels else 0
+            
+            stats.append({
+                "地點": location,
+                "飯店總數": len(hotels),
+                "五星飯店": five_star_count,
+                "溫泉飯店": hot_spring_count,
+                "平均距離": round(avg_distance, 1),
+                "最近距離": min([h['距離(公里)'] for h in hotels]) if hotels else 0,
+                "座標": coords
+            })
+        else:
+            stats.append({
+                "地點": location,
+                "飯店總數": 0,
+                "五星飯店": 0,
+                "溫泉飯店": 0,
+                "平均距離": 0,
+                "最近距離": 0,
+                "座標": None
+            })
+    
+    return pd.DataFrame(stats)
+
 def create_result_table(hotels_df):
     """創建美化的結果表格 HTML"""
     html = """
@@ -268,8 +329,12 @@ st.markdown("<br>", unsafe_allow_html=True)
 st.markdown('<div class="search-container">', unsafe_allow_html=True)
 st.markdown("### 🔍 開始您的飯店搜尋之旅")
 
-# 載入資料（移到側邊欄外面，避免重複載入）
-df = download_hotel_data()
+# 載入資料（使用快取）
+@st.cache_data
+def load_hotel_data_for_filters():
+    return download_hotel_data()
+
+df = load_hotel_data_for_filters()
 
 # 在側邊欄顯示篩選選項
 with st.sidebar:
@@ -331,38 +396,141 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # 系統資訊
+    # 系統資訊和篩選預覽
     st.markdown("### 📋 系統資訊")
     if df is not None:
         st.success(f"✅ 已載入 {len(df)} 筆飯店資料")
         
-        # 顯示篩選統計
-        filtered_count = len(df)
-        if selected_star != "🌟 全部星級":
-            star_name = selected_star.replace("⭐ ", "")
-            filtered_count = len(df[df['標章'] == star_name])
-        
-        if hot_spring_filter:
-            hot_spring_count = len(df[df['溫泉標章'] == '是'])
-            st.info(f"♨️ 溫泉飯店：{hot_spring_count} 間")
+        # 即時篩選預覽
+        try:
+            preview_df = df.copy()
+            
+            # 應用基本星級篩選
+            preview_df = filter_star_hotels(preview_df)
+            basic_count = len(preview_df)
+            
+            # 應用星級篩選器
+            if selected_star != "🌟 全部星級":
+                star_name = selected_star.replace("⭐ ", "")
+                preview_df = preview_df[preview_df['標章'] == star_name]
+            
+            # 應用溫泉篩選
+            if hot_spring_filter:
+                preview_df = preview_df[preview_df['溫泉標章'] == '是']
+            
+            # 應用房間數篩選
+            if room_filter != "🏨 全部規模":
+                try:
+                    preview_df['房間數_清理'] = pd.to_numeric(preview_df['房間數'], errors='coerce')
+                    if room_filter == "🏠 精品小型 (50間以下)":
+                        preview_df = preview_df[
+                            (preview_df['房間數_清理'].notna()) & 
+                            (preview_df['房間數_清理'] < 50)
+                        ]
+                    elif room_filter == "🏢 中型規模 (50-150間)":
+                        preview_df = preview_df[
+                            (preview_df['房間數_清理'].notna()) & 
+                            (preview_df['房間數_清理'] >= 50) & 
+                            (preview_df['房間數_清理'] <= 150)
+                        ]
+                    elif room_filter == "🏨 大型飯店 (150-300間)":
+                        preview_df = preview_df[
+                            (preview_df['房間數_清理'].notna()) & 
+                            (preview_df['房間數_清理'] > 150) & 
+                            (preview_df['房間數_清理'] <= 300)
+                        ]
+                    elif room_filter == "🏰 超大型 (300間以上)":
+                        preview_df = preview_df[
+                            (preview_df['房間數_清理'].notna()) & 
+                            (preview_df['房間數_清理'] > 300)
+                        ]
+                except:
+                    pass  # 如果房間數篩選出錯，跳過
+            
+            final_count = len(preview_df)
+            
+            # 顯示篩選結果統計
+            st.info(f"🏨 符合條件飯店：{final_count} 間")
+            if final_count != basic_count:
+                st.caption(f"從 {basic_count} 間篩選得出")
+            
+            # 溫泉飯店統計
+            hot_spring_total = len(df[df['溫泉標章'] == '是'])
+            st.info(f"♨️ 全台溫泉飯店：{hot_spring_total} 間")
+            
+        except Exception as e:
+            st.warning("篩選預覽計算中...")
         
         st.info(f"🌟 涵蓋全台星級飯店")
     else:
         st.error("❌ 資料載入失敗")
 
-# 搜尋輸入區域
-col1, col2 = st.columns([4, 1])
+# 搜尋模式選擇
+search_mode = st.radio(
+    "🔍 搜尋模式",
+    options=["📍 單地點搜尋", "🗺️ 多地點比較"],
+    horizontal=True,
+    help="選擇單一地點搜尋或多地點比較模式"
+)
 
-with col1:
-    place = st.text_input(
-        "🏙️ 請輸入您想搜尋的地點", 
-        placeholder="例如：台北市信義區、高雄市左營區、台中市西屯區、桃園機場",
-        help="💡 輸入您想查詢的地點，系統會搜尋附近10公里內的星級飯店"
-    )
+if search_mode == "📍 單地點搜尋":
+    # 單地點搜尋輸入區域
+    col1, col2 = st.columns([4, 1])
+    
+    with col1:
+        place = st.text_input(
+            "🏙️ 請輸入您想搜尋的地點", 
+            placeholder="例如：台北市信義區、高雄市左營區、台中市西屯區、桃園機場",
+            help="💡 輸入您想查詢的地點，系統會搜尋附近的星級飯店"
+        )
+    
+    with col2:
+        st.markdown("<br>", unsafe_allow_html=True)  # 對齊按鈕
+        search_button = st.button("🔍 開始搜尋", type="primary", use_container_width=True)
+    
+    # 多地點比較相關變數設為 None
+    multi_places = None
+    compare_button = False
 
-with col2:
-    st.markdown("<br>", unsafe_allow_html=True)  # 對齊按鈕
-    search_button = st.button("🔍 開始搜尋", type="primary", use_container_width=True)
+else:  # 多地點比較模式
+    st.markdown("### 🗺️ 多地點比較搜尋")
+    
+    # 多地點輸入區域
+    col1, col2 = st.columns([4, 1])
+    
+    with col1:
+        multi_places_input = st.text_area(
+            "🗺️ 請輸入多個地點進行比較", 
+            placeholder="請輸入多個地點，每行一個地點，例如：\n台北車站\n台中火車站\n高雄火車站",
+            height=100,
+            help="💡 每行輸入一個地點，最多支援5個地點同時比較"
+        )
+        
+        # 處理多地點輸入
+        if multi_places_input.strip():
+            multi_places = [place.strip() for place in multi_places_input.strip().split('\n') if place.strip()]
+            if len(multi_places) > 5:
+                st.warning("⚠️ 最多支援5個地點比較，已自動截取前5個")
+                multi_places = multi_places[:5]
+            elif len(multi_places) < 2:
+                st.info("💡 請輸入至少2個地點進行比較")
+                multi_places = None
+        else:
+            multi_places = None
+    
+    with col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        compare_button = st.button("🔍 開始比較", type="primary", use_container_width=True)
+    
+    # 顯示將要比較的地點
+    if multi_places:
+        st.markdown("**📍 將要比較的地點：**")
+        for i, loc in enumerate(multi_places, 1):
+            st.markdown(f"  {i}. {loc}")
+    
+    # 單地點搜尋相關變數設為 None
+    place = None
+    search_button = False
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -398,20 +566,36 @@ if search_button and place:
         
         # 4. 應用房間數篩選（飯店規模）
         if room_filter != "🏨 全部規模":
-            if room_filter == "🏠 精品小型 (50間以下)":
-                filtered_df = filtered_df[filtered_df['房間數'].astype(float) < 50]
-            elif room_filter == "🏢 中型規模 (50-150間)":
-                filtered_df = filtered_df[
-                    (filtered_df['房間數'].astype(float) >= 50) & 
-                    (filtered_df['房間數'].astype(float) <= 150)
-                ]
-            elif room_filter == "🏨 大型飯店 (150-300間)":
-                filtered_df = filtered_df[
-                    (filtered_df['房間數'].astype(float) > 150) & 
-                    (filtered_df['房間數'].astype(float) <= 300)
-                ]
-            elif room_filter == "🏰 超大型 (300間以上)":
-                filtered_df = filtered_df[filtered_df['房間數'].astype(float) > 300]
+            try:
+                # 清理房間數資料，轉換為數字型態
+                filtered_df = filtered_df.copy()
+                filtered_df['房間數_清理'] = pd.to_numeric(filtered_df['房間數'], errors='coerce')
+                
+                if room_filter == "🏠 精品小型 (50間以下)":
+                    filtered_df = filtered_df[
+                        (filtered_df['房間數_清理'].notna()) & 
+                        (filtered_df['房間數_清理'] < 50)
+                    ]
+                elif room_filter == "🏢 中型規模 (50-150間)":
+                    filtered_df = filtered_df[
+                        (filtered_df['房間數_清理'].notna()) & 
+                        (filtered_df['房間數_清理'] >= 50) & 
+                        (filtered_df['房間數_清理'] <= 150)
+                    ]
+                elif room_filter == "🏨 大型飯店 (150-300間)":
+                    filtered_df = filtered_df[
+                        (filtered_df['房間數_清理'].notna()) & 
+                        (filtered_df['房間數_清理'] > 150) & 
+                        (filtered_df['房間數_清理'] <= 300)
+                    ]
+                elif room_filter == "🏰 超大型 (300間以上)":
+                    filtered_df = filtered_df[
+                        (filtered_df['房間數_清理'].notna()) & 
+                        (filtered_df['房間數_清理'] > 300)
+                    ]
+            except Exception as e:
+                st.warning(f"房間數篩選時發生問題，已跳過此篩選條件")
+                # 如果出錯，就不應用房間數篩選
         
         # 5. 搜尋指定範圍內的飯店
         hotels = []
@@ -606,6 +790,238 @@ if search_button and place:
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+# 多地點比較處理
+elif compare_button and multi_places:
+    if df is None:
+        st.error("❌ 無法載入飯店資料，請稍後再試")
+        st.stop()
+    
+    st.markdown("## 🗺️ 多地點比較結果")
+    
+    with st.spinner(f"🔍 正在搜尋 {len(multi_places)} 個地點的星級飯店..."):
+        # 應用篩選條件
+        filtered_df = df.copy()
+        
+        # 1. 篩選星級飯店（基本篩選）
+        filtered_df = filter_star_hotels(filtered_df)
+        
+        # 2. 應用星級篩選器
+        if selected_star != "🌟 全部星級":
+            star_name = selected_star.replace("⭐ ", "")
+            filtered_df = filtered_df[filtered_df['標章'] == star_name]
+        
+        # 3. 應用溫泉篩選
+        if hot_spring_filter:
+            filtered_df = filtered_df[filtered_df['溫泉標章'] == '是']
+        
+        # 4. 應用房間數篩選（飯店規模）
+        if room_filter != "🏨 全部規模":
+            try:
+                # 清理房間數資料，轉換為數字型態
+                filtered_df = filtered_df.copy()
+                filtered_df['房間數_清理'] = pd.to_numeric(filtered_df['房間數'], errors='coerce')
+                
+                if room_filter == "🏠 精品小型 (50間以下)":
+                    filtered_df = filtered_df[
+                        (filtered_df['房間數_清理'].notna()) & 
+                        (filtered_df['房間數_清理'] < 50)
+                    ]
+                elif room_filter == "🏢 中型規模 (50-150間)":
+                    filtered_df = filtered_df[
+                        (filtered_df['房間數_清理'].notna()) & 
+                        (filtered_df['房間數_清理'] >= 50) & 
+                        (filtered_df['房間數_清理'] <= 150)
+                    ]
+                elif room_filter == "🏨 大型飯店 (150-300間)":
+                    filtered_df = filtered_df[
+                        (filtered_df['房間數_清理'].notna()) & 
+                        (filtered_df['房間數_清理'] > 150) & 
+                        (filtered_df['房間數_清理'] <= 300)
+                    ]
+                elif room_filter == "🏰 超大型 (300間以上)":
+                    filtered_df = filtered_df[
+                        (filtered_df['房間數_清理'].notna()) & 
+                        (filtered_df['房間數_清理'] > 300)
+                    ]
+            except Exception as e:
+                st.warning(f"房間數篩選時發生問題，已跳過此篩選條件")
+        
+        # 為每個地點搜尋飯店
+        location_results = {}
+        progress_bar = st.progress(0)
+        
+        for i, location in enumerate(multi_places):
+            progress_bar.progress((i + 1) / len(multi_places))
+            coords, hotels = search_hotels_for_location(location, filtered_df, distance_range)
+            location_results[location] = (coords, hotels)
+    
+    progress_bar.empty()
+    
+    # 生成比較統計
+    stats_df = generate_comparison_stats(location_results)
+    
+    # 顯示比較結果
+    if stats_df['飯店總數'].sum() > 0:
+        # 比較統計表格
+        st.markdown("### 📊 地點比較統計")
+        
+        # 美化的統計表格
+        st.dataframe(
+            stats_df,
+            use_container_width=True,
+            column_config={
+                "地點": st.column_config.TextColumn(
+                    "📍 地點",
+                    help="搜尋地點"
+                ),
+                "飯店總數": st.column_config.NumberColumn(
+                    "🏨 飯店總數",
+                    help="符合條件的飯店數量"
+                ),
+                "五星飯店": st.column_config.NumberColumn(
+                    "⭐ 五星飯店",
+                    help="五星級飯店數量"
+                ),
+                "溫泉飯店": st.column_config.NumberColumn(
+                    "♨️ 溫泉飯店",
+                    help="溫泉飯店數量"
+                ),
+                "平均距離": st.column_config.NumberColumn(
+                    "📏 平均距離(km)",
+                    help="飯店平均距離"
+                ),
+                "最近距離": st.column_config.NumberColumn(
+                    "🎯 最近距離(km)",
+                    help="最近飯店距離"
+                )
+            },
+            hide_index=True
+        )
+        
+        # 智能推薦
+        st.markdown("### 🏆 智能推薦")
+        
+        # 找出最佳地點
+        best_total = stats_df.loc[stats_df['飯店總數'].idxmax()]
+        best_five_star = stats_df.loc[stats_df['五星飯店'].idxmax()] if stats_df['五星飯店'].max() > 0 else None
+        best_hot_spring = stats_df.loc[stats_df['溫泉飯店'].idxmax()] if stats_df['溫泉飯店'].max() > 0 else None
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <h3>🏨</h3>
+                <h4>選擇最多</h4>
+                <p><strong>{best_total['地點']}</strong></p>
+                <p>{best_total['飯店總數']} 間飯店</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            if best_five_star is not None:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>⭐</h3>
+                    <h4>五星最多</h4>
+                    <p><strong>{best_five_star['地點']}</strong></p>
+                    <p>{best_five_star['五星飯店']} 間五星</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>⭐</h3>
+                    <h4>五星最多</h4>
+                    <p><strong>無五星飯店</strong></p>
+                    <p>調整篩選條件</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        with col3:
+            if best_hot_spring is not None:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>♨️</h3>
+                    <h4>溫泉最多</h4>
+                    <p><strong>{best_hot_spring['地點']}</strong></p>
+                    <p>{best_hot_spring['溫泉飯店']} 間溫泉</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>♨️</h3>
+                    <h4>溫泉最多</h4>
+                    <p><strong>無溫泉飯店</strong></p>
+                    <p>調整搜尋地點</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # 詳細結果展示
+        st.markdown("### 📋 各地點詳細結果")
+        
+        for location, (coords, hotels) in location_results.items():
+            if coords and hotels:
+                with st.expander(f"📍 {location} - {len(hotels)} 間飯店", expanded=False):
+                    df_location = pd.DataFrame(hotels)
+                    st.dataframe(
+                        df_location,
+                        use_container_width=True,
+                        column_config={
+                            "飯店名稱": st.column_config.TextColumn("🏨 飯店名稱"),
+                            "星級標章": st.column_config.TextColumn("⭐ 星級"),
+                            "地址": st.column_config.TextColumn("📍 地址"),
+                            "電話": st.column_config.TextColumn("📞 電話"),
+                            "房間數": st.column_config.NumberColumn("🏢 房間數"),
+                            "溫泉": st.column_config.TextColumn("♨️ 溫泉"),
+                            "距離(公里)": st.column_config.NumberColumn("📏 距離(km)")
+                        },
+                        hide_index=True
+                    )
+            elif coords:
+                st.info(f"📍 {location}：未找到符合條件的飯店")
+            else:
+                st.error(f"📍 {location}：地點定位失敗")
+        
+        # 合併下載功能
+        if any(hotels for coords, hotels in location_results.values()):
+            st.markdown("### 📥 下載比較結果")
+            
+            # 合併所有結果
+            all_hotels = []
+            for location, (coords, hotels) in location_results.items():
+                for hotel in hotels:
+                    hotel_copy = hotel.copy()
+                    hotel_copy['搜尋地點'] = location
+                    all_hotels.append(hotel_copy)
+            
+            if all_hotels:
+                df_all = pd.DataFrame(all_hotels)
+                csv_data = df_all.to_csv(index=False, encoding='utf-8')
+                csv_with_bom = '\ufeff' + csv_data
+                
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    st.download_button(
+                        label="📥 下載完整比較結果 (CSV)",
+                        data=csv_with_bom.encode('utf-8'),
+                        file_name=f"多地點飯店比較_{len(multi_places)}地點_{len(all_hotels)}間飯店.csv",
+                        mime="text/csv; charset=utf-8",
+                        use_container_width=True,
+                        type="secondary"
+                    )
+    
+    else:
+        st.warning("😔 所有地點都沒有找到符合條件的星級飯店")
+        st.info("""
+        💡 建議：
+        - 增加搜尋距離範圍
+        - 放寬篩選條件
+        - 檢查地點名稱是否正確
+        - 嘗試搜尋較大的城市區域
+        """)
 
 # 美化的頁面底部
 st.markdown("<br><br>", unsafe_allow_html=True)
